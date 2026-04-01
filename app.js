@@ -34,17 +34,30 @@ async function loadStorage() {
 // getAllContacts and restoreBatch — loaded dynamically from db.js
 // so older cached versions of db.js don't break the app
 async function getAllContactsDynamic(onChunk) {
+  // Try to use getAllContacts from db.js if available
   try {
     const mod = await import('./db.js');
     if (typeof mod.getAllContacts === 'function') {
       return await mod.getAllContacts(onChunk);
     }
   } catch(e) {}
-  // Fallback: use exportFilteredStream which always exists
-  const chunks = [];
-  await exportFilteredStream({}, rows => { rows.forEach(r => chunks.push(r)); });
-  if (chunks.length) onChunk(chunks);
-  return chunks.length;
+
+  // Fallback: paginate through contacts using queryFiltered
+  // exportFilteredStream returns CSV strings, NOT objects — don't use it here
+  const PAGE = 5000;
+  let offset = 0;
+  let total  = 0;
+  while (true) {
+    const rows = await queryFiltered({}, PAGE + 1, offset);
+    const hasMore = rows.length > PAGE;
+    const batch   = hasMore ? rows.slice(0, PAGE) : rows;
+    if (batch.length === 0) break;
+    onChunk(batch);
+    total  += batch.length;
+    offset += PAGE;
+    if (!hasMore) break;
+  }
+  return total;
 }
 
 async function restoreBatchDynamic(contacts) {
