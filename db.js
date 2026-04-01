@@ -189,9 +189,8 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
   return new Promise((resolve, reject) => {
     let added = 0, skipped = 0;
 
-    // Dedup intra-batch: evita insertar duplicados dentro del mismo lote
-    const batchSeenRUT   = new Set();
-    const batchSeenPhone = new Set();
+    // Dedup intra-batch: evita insertar el mismo RUT dos veces en el mismo lote
+    const batchSeenRUT = new Set();
 
     const t = tx(['contacts','optouts'], 'readwrite');
     const store    = t.objectStore('contacts');
@@ -206,15 +205,10 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
       // Renombrar id del CSV para no conflictuar con autoIncrement
       if (c.id !== undefined) { c.sourceId = c.id; delete c.id; }
 
-      // ── Dedup intra-batch ──────────────────────────────────────
+      // Dedup intra-batch solo por RUT
       const rut   = c.document || '';
-      const phone = c.phone    || '';
-
-      if (rut && batchSeenRUT.has(rut))     { skipped++; continue; }
-      if (phone && phone.replace(/\D/g,'').length >= 7 && batchSeenPhone.has(phone)) { skipped++; continue; }
-
-      if (rut)   batchSeenRUT.add(rut);
-      if (phone) batchSeenPhone.add(phone);
+      if (rut && batchSeenRUT.has(rut)) { skipped++; continue; }
+      if (rut) batchSeenRUT.add(rut);
 
       // ── Opt-out check + insert ─────────────────────────────────
       if (phone) {
@@ -242,20 +236,17 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
 }
 
 /* ─── DEDUPE PASS EN BACKGROUND ─────────────────────────────────
- * Elimina duplicados por RUT (document) Y por teléfono (phone).
- * Un contacto es duplicado si ya vimos su RUT O su teléfono.
- * Política: mantiene el primer registro encontrado (id más bajo).
- * Se ejecuta en dos fases:
- *   1. Readonly scan: colecta IDs a eliminar
- *   2. Deletes en chunks de 500 (no bloquea reads)
+ * Elimina duplicados por RUT (document) SOLAMENTE.
+ * No deduplicamos por teléfono porque múltiples personas legítimas
+ * pueden compartir un número (familia, empresa, etc.) con RUTs distintos.
+ * Mantiene el primer registro encontrado (id más bajo = más antiguo).
  */
 export async function dedupePassByPhone(onProgress) {
   if (!db) throw new Error('DB no inicializada');
 
   return new Promise((resolve, reject) => {
-    const seenRUT   = new Map(); // rut   → id del primer registro
-    const seenPhone = new Map(); // phone → id del primer registro
-    const toDelete  = [];
+    const seenRUT = new Map(); // rut → id del primer registro
+    const toDelete = [];
     let scanned = 0;
 
     const scanTx = db.transaction(['contacts'], 'readonly');
@@ -265,41 +256,25 @@ export async function dedupePassByPhone(onProgress) {
     cur.onsuccess = (e) => {
       const cursor = e.target.result;
       if (!cursor) {
-        // Fase 2: eliminar en chunks
         deleteChunked(toDelete, resolve, reject, onProgress);
         return;
       }
 
       scanned++;
-      const { document: rut, phone, id } = cursor.value;
+      const { document: rut, id } = cursor.value;
 
-      let isDup = false;
-
-      // Chequear RUT
+      // Solo deduplicar por RUT — el teléfono NO es clave única
       if (rut) {
         if (seenRUT.has(rut)) {
-          isDup = true;
+          toDelete.push(id);
         } else {
           seenRUT.set(rut, id);
         }
       }
 
-      // Chequear teléfono (independiente del RUT)
-      // Solo si tiene teléfono válido (≥7 dígitos)
-      if (!isDup && phone && phone.replace(/\D/g,'').length >= 7) {
-        if (seenPhone.has(phone)) {
-          isDup = true;
-        } else {
-          seenPhone.set(phone, id);
-        }
-      }
-
-      if (isDup) toDelete.push(id);
-
       if (scanned % 10000 === 0 && onProgress) {
         onProgress(toDelete.length, scanned, false);
       }
-
       cursor.continue();
     };
 
@@ -414,10 +389,22 @@ export async function queryFiltered(filter = {}, limit = 50, offset = 0) {
   });
 }
 
+// Normaliza el id para IDB: convierte "123" → 123 si es numérico.
+// Los datasets HTML siempre devuelven strings; IDB autoIncrement usa números.
+function normalizeId(id) {
+  if (id === undefined || id === null || id === '') return id;
+  const n = Number(id);
+  return isNaN(n) ? id : n;  // si no es numérico, dejarlo como string
+}
+
 export async function getContactById(id) {
   return new Promise((resolve, reject) => {
     try {
-      const r = tx('contacts','readonly').objectStore('contacts').get(id);
+      const key = normalizeId(id);
+      if (key === undefined || key === null || key === '') {
+        return resolve(null);
+      }
+      const r = tx('contacts','readonly').objectStore('contacts').get(key);
       r.onsuccess = () => resolve(r.result || null);
       r.onerror   = (e) => reject(e.target.error);
     } catch(err) { reject(err); }
@@ -427,9 +414,10 @@ export async function getContactById(id) {
 export async function updateContactStatus(id, status, note = '') {
   return new Promise((resolve, reject) => {
     try {
+      const key = normalizeId(id);
       const t = tx(['contacts','history']);
       const store = t.objectStore('contacts');
-      const r = store.get(id);
+      const r = store.get(key);
       r.onsuccess = () => {
         const rec = r.result;
         if (!rec) return resolve(false);
@@ -439,19 +427,17 @@ export async function updateContactStatus(id, status, note = '') {
         if (!rec.notes) rec.notes = [];
         if (note) rec.notes.push({ text:note, ts:Date.now() });
 
-        // Si es 'purchased', incrementar contador de compras
         if (status === 'purchased') {
           rec.purchaseCount = (rec.purchaseCount || 0) + 1;
         }
 
         store.put(rec).onsuccess = () => {
           t.objectStore('history').add({
-            contactId: id, action:'status_update',
+            contactId: key, action:'status_update',
             meta:{ from:oldStatus, to:status, note,
                    purchaseCount: rec.purchaseCount },
             timestamp:Date.now()
           });
-          // KPIs incrementales (exactitud final viene de recalculateKPIs)
           Promise.all([
             incrementKPI(oldStatus, -1),
             incrementKPI(status, +1),
@@ -463,13 +449,13 @@ export async function updateContactStatus(id, status, note = '') {
   });
 }
 
-/** Incrementa manualmente el contador de compras sin cambiar el status */
 export async function incrementPurchaseCount(id, delta = 1) {
   return new Promise((resolve, reject) => {
     try {
+      const key = normalizeId(id);
       const t = tx(['contacts','history']);
       const store = t.objectStore('contacts');
-      const r = store.get(id);
+      const r = store.get(key);
       r.onsuccess = () => {
         const rec = r.result;
         if (!rec) return resolve(null);
@@ -477,7 +463,7 @@ export async function incrementPurchaseCount(id, delta = 1) {
         rec.updatedAt = Date.now();
         store.put(rec).onsuccess = () => {
           t.objectStore('history').add({
-            contactId: id, action:'purchase_count',
+            contactId: key, action:'purchase_count',
             meta:{ delta, total: rec.purchaseCount }, timestamp:Date.now()
           });
           resolve(rec);
@@ -640,5 +626,58 @@ export async function clearAllData() {
       t.oncomplete = () => resolve();
       t.onerror    = (e) => reject(e.target.error);
     } catch(err) { reject(err); }
+  });
+}
+
+/**
+ * getAllContacts - reads ALL contacts for OPFS snapshot.
+ * Uses chunked cursor to avoid loading 1M objects at once.
+ * Calls onChunk(rows[]) for each CHUNK records.
+ */
+export async function getAllContacts(onChunk, chunkSize = 5000) {
+  return new Promise((resolve, reject) => {
+    try {
+      let buf = [], total = 0;
+      const t   = tx('contacts', 'readonly');
+      const req = t.objectStore('contacts').openCursor();
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (!cursor) {
+          if (buf.length) { onChunk(buf); total += buf.length; }
+          resolve(total);
+          return;
+        }
+        buf.push(cursor.value);
+        if (buf.length >= chunkSize) {
+          onChunk(buf);
+          total += buf.length;
+          buf = [];
+        }
+        cursor.continue();
+      };
+      req.onerror = (e) => reject(e.target.error);
+    } catch(err) { reject(err); }
+  });
+}
+
+/**
+ * restoreBatch - insert contacts during OPFS restore.
+ * Strips the 'id' field so IDB assigns a new autoIncrement key.
+ */
+export async function restoreBatch(contacts = []) {
+  if (!contacts.length) return 0;
+  return new Promise((resolve, reject) => {
+    let inserted = 0;
+    const t = tx('contacts', 'readwrite');
+    const s = t.objectStore('contacts');
+    t.oncomplete = () => resolve(inserted);
+    t.onerror    = (e) => reject(e.target.error);
+    contacts.forEach(c => {
+      const copy = Object.assign({}, c);
+      delete copy.id; // let IDB assign new key
+      const r = s.put(copy);
+      r.onsuccess = () => inserted++;
+      r.onerror   = (ev) => ev.preventDefault();
+    });
   });
 }
