@@ -1,0 +1,44 @@
+# Servidor local (no necesario en producción)
+server.js
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+
+# Vercel
+.vercel/
+
+# Archivos de entorno con secretos
+.env
+.env.local
+.env.*.local
+
+# Backups y exports generados por la app
+*.crm
+crm_export_*.csv
+crm_backup_*.crm
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+Desktop.ini
+
+# Editores
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Archivos CSV de datos reales (no subir datos personales)
+extracto_*.csv
+Branch*.csv
+prueba_*.csv
