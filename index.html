@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CRM Enterprise</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Toasts -->
+<div id="toasts" style="position:fixed;top:12px;right:12px;z-index:200;display:flex;flex-direction:column;gap:6px;pointer-events:none" aria-live="polite"></div>
+
+<div class="app">
+
+  <!-- ① TOP NAV ──────────────────────────────────────────────── -->
+  <nav class="topnav">
+    <div class="logo">
+      CRM <span class="logo-sep">/</span> Enterprise
+      <span style="font-size:11px;font-weight:400;color:var(--text3);font-family:var(--mono);margin-left:4px" id="dbStatus">●</span>
+    </div>
+    <span id="storageInfo" style="font-size:10.5px;color:var(--text3);font-family:var(--mono)"></span>
+    <div class="nav-actions">
+      <input id="fileInput"      type="file" accept=".csv" multiple style="display:none" />
+      <input id="backupFileInput" type="file" accept=".crm,.json" style="display:none" />
+      <button id="btnUpload"       class="btn btn-primary">↑ Importar CSV</button>
+      <button id="btnExport"       class="btn">↓ Exportar CSV</button>
+      <button id="btnSaveSnapshot" class="btn" title="Guardar snapshot en almacenamiento local del navegador">💾 Snapshot</button>
+      <button id="btnExportBackup" class="btn" title="Descargar backup completo como archivo .crm">⬇ Backup .crm</button>
+      <button id="btnImportBackup" class="btn" title="Restaurar desde archivo .crm">⬆ Restaurar</button>
+      <button id="btnTemplates"    class="btn">Plantillas</button>
+      <button id="btnDedupe"       class="btn btn-warn">⚡ Dedupe RUT</button>
+      <button id="btnGenSynthetic" class="btn btn-ghost" style="font-size:11px">Sintético</button>
+      <button id="btnClearData"    class="btn btn-danger">Limpiar</button>
+    </div>
+  </nav>
+
+  <!-- ② BARRA DE PROGRESO (oculta) ──────────────────────────── -->
+  <div id="progressSection" class="prog-bar" style="display:none">
+    <div class="prog-track">
+      <div id="progressBar" class="prog-fill" style="width:0%"></div>
+    </div>
+    <div class="prog-meta">
+      <span id="progressText">Procesando…</span>
+      <span id="progressPct">0%</span>
+    </div>
+  </div>
+
+  <!-- ③ KPI BAR ─────────────────────────────────────────────── -->
+  <div class="kpibar">
+    <div class="kpi kpi-total" style="--kpi-color:var(--text)">
+      <div class="kpi-label">Total contactos</div>
+      <div id="k_total" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--yellow)">
+      <div class="kpi-label">Sin contactar</div>
+      <div id="k_pending" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--blue)">
+      <div class="kpi-label">Contactados</div>
+      <div id="k_contacted" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--violet)">
+      <div class="kpi-label">Respondieron</div>
+      <div id="k_responded" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--green)">
+      <div class="kpi-label">Compraron</div>
+      <div id="k_purchased" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--zinc)">
+      <div class="kpi-label">Sin respuesta</div>
+      <div id="k_noresponse" class="kpi-value">0</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--red)">
+      <div class="kpi-label">Dados de baja</div>
+      <div id="k_optout" class="kpi-value">0</div>
+    </div>
+  </div>
+
+  <!-- ④ TOOLBAR ─────────────────────────────────────────────── -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input id="searchInput" class="input input-search" type="search" placeholder="Buscar por RUT, teléfono o nombre…" aria-label="Buscar" />
+      <select id="statusFilter" class="input" style="width:160px">
+        <option value="">Todos los estados</option>
+        <option value="pending">Sin contactar</option>
+        <option value="contacted">Contactado</option>
+        <option value="responded">Respondió</option>
+        <option value="purchased">Compró</option>
+        <option value="noresponse">Sin respuesta</option>
+        <option value="optout">Dado de baja</option>
+      </select>
+      <span id="resultCount" class="result-count"></span>
+    </div>
+    <div class="toolbar-right">
+      <button id="btnPrevPage" class="btn-sm" disabled>← Ant.</button>
+      <span id="pageNum" style="font-size:11.5px;color:var(--text3);font-family:var(--mono);white-space:nowrap;min-width:52px;text-align:center">Pág. 1</span>
+      <button id="btnNextPage" class="btn-sm" disabled>Sig. →</button>
+    </div>
+  </div>
+
+  <!-- ⑤ CONTENT: tabla + drawer ─────────────────────────────── -->
+  <div class="content">
+
+    <!-- TABLA -->
+    <div class="table-wrap">
+      <table>
+        <colgroup>
+          <col /><col /><col /><col /><col /><col />
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="td-num">#</th>
+            <th>Nombre</th>
+            <th>Teléfono</th>
+            <th>RUT</th>
+            <th>Estado</th>
+            <th>Enviar</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr>
+            <td colspan="6" style="text-align:center;padding:80px 0;color:var(--text3)">
+              Importa un archivo CSV para comenzar
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- DRAWER de detalle (se abre al clickear una fila) -->
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <div class="drawer-head-left">
+          <div class="drawer-title">Ficha de contacto</div>
+          <div id="drawerRUT" class="drawer-rut">—</div>
+        </div>
+        <button id="btnCloseDrawer" class="btn-ghost btn" style="height:26px;padding:0 8px;font-size:16px;line-height:1" aria-label="Cerrar">✕</button>
+      </div>
+      <div id="drawerBody" class="drawer-body">
+        <p style="color:var(--text3);font-size:12px">Selecciona una fila</p>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ⑥ BOTTOM BAR: selección masiva + goteo ─────────────────── -->
+  <div class="bottombar">
+    <button id="btnSelectAll" class="btn-sm">Sel. página</button>
+    <span id="selCount" style="font-size:11.5px;color:var(--text3);min-width:70px">0 sel.</span>
+    <div class="bb-sep"></div>
+    <span class="bb-label">Plantilla:</span>
+    <select id="templateSelect" class="input" style="width:170px;height:28px;font-size:12px">
+      <option value="">Sin plantilla</option>
+    </select>
+    <button id="btnPreviewLinks" class="btn" style="height:28px;font-size:11.5px">Ver enlaces</button>
+    <button id="btnStartDrip"    class="btn" style="height:28px;font-size:11.5px">Iniciar goteo</button>
+    <div class="bb-sep"></div>
+    <!-- Log inline en bottom bar -->
+    <span id="inlineLog" style="font-size:11px;font-family:var(--mono);color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
+  </div>
+
+</div><!-- /app -->
+
+<!-- Modal Plantillas -->
+<div id="templatesModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <div class="modal-title">Gestionar plantillas</div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Variables: <code style="color:var(--blue)">{{name}}</code> <code style="color:var(--blue)">{{phone}}</code> <code style="color:var(--blue)">{{document}}</code></p>
+    <input id="tplName"  class="input" style="margin-bottom:8px" placeholder="Nombre de la plantilla" />
+    <textarea id="tplBody" class="input" style="height:120px" placeholder="Hola {{name}}, te escribimos de…"></textarea>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button id="btnSaveTpl"  class="btn btn-primary">Guardar</button>
+      <button id="btnCloseTpl" class="btn">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Preview enlaces -->
+<div id="linksModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-box" style="max-height:80vh">
+    <div class="modal-title">Preview de enlaces</div>
+    <div id="linksPreview" style="overflow-y:auto;max-height:380px;display:flex;flex-direction:column;gap:8px"></div>
+    <button class="btn" style="margin-top:16px" onclick="document.getElementById('linksModal').classList.add('hidden')">Cerrar</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
