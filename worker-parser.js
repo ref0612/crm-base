@@ -93,6 +93,23 @@ function nullToEmpty(v) {
   return /^null$/i.test(s) ? '' : s;
 }
 
+// Normaliza nombres: quita @ y espacios extra, capitaliza cada palabra
+// "Daniel @Soto Oyarzun" -> "Daniel Soto Oyarzun"
+// "patricia@murua"       -> "Patricia Murua"
+function normalizeName(raw) {
+  if (!raw) return '';
+  return raw
+    .replace(/@/g, ' ')           // quitar arroba
+    .replace(/\s+/g, ' ')         // colapsar espacios
+    .trim()
+    .split(' ')
+    .map(function(w) {
+      if (!w) return '';
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 // --- double-quoted row unwrapper (Kupos CSV format) ---
 function unwrapRow(fields, headerCount) {
   if (fields.length === 1 && headerCount > 1) {
@@ -173,6 +190,7 @@ function processRow(rawRow) {
 
   return {
     row: Object.assign(obj, {
+      name:  normalizeName(obj.name || ''),   // limpiar @ y capitalizar
       phone: phone,
       document: rut,
       status: 'pending',
@@ -248,16 +266,15 @@ self.onmessage = function(e) {
           continue;
         }
 
-        // Bloom filter: dedupe by RUT AND phone independently
-        var rutKey   = 'R:' + res.row.document;
-        var phoneKey = res.row.phone ? ('P:' + res.row.phone) : null;
+        // Bloom filter: deduplicar SOLO por RUT.
+        // No usamos teléfono como clave porque múltiples personas
+        // pueden compartir un número (familia, empresa) con RUTs distintos.
+        const rutKey = 'R:' + res.row.document;
 
-        if (bloomHas(rutKey) || (phoneKey && bloomHas(phoneKey))) {
+        if (bloomHas(rutKey)) {
           stats.duplicates++;
-          // Still send in fastImport mode - dedupe pass will clean up
         } else {
           bloomAdd(rutKey);
-          if (phoneKey) bloomAdd(phoneKey);
           stats.inserted++;
         }
 

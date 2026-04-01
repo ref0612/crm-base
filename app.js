@@ -179,12 +179,14 @@ function bindUI() {
   if ($('btnExportBackup'))  $('btnExportBackup').onclick  = doExportBackup;
   if ($('btnImportBackup'))  $('btnImportBackup').onclick  = () => $('backupFileInput').click();
   if ($('backupFileInput'))  $('backupFileInput').onchange = doImportBackup;
+  if ($('btnBulkStatus'))    $('btnBulkStatus').onclick    = doBulkStatus;
+  if ($('btnConversion'))    $('btnConversion').onclick    = doShowConversion;
 
-  // Busqueda con debounce 300ms
+  // Busqueda instantanea
   let t;
   $('searchInput').addEventListener('input', () => {
     clearTimeout(t);
-    t = setTimeout(() => { filter.q = $('searchInput').value.trim(); loadPage(1); }, 300);
+    t = setTimeout(() => { filter.q = $('searchInput').value.trim(); loadPage(1); }, 0);
   });
   $('statusFilter').addEventListener('change', () => {
     filter.status = $('statusFilter').value; loadPage(1);
@@ -395,7 +397,11 @@ function renderTable(rows) {
     tr.innerHTML = `
       <td class="td-num">${(page-1)*CFG.PAGE_SIZE + i + 1}</td>
       <td class="td-name" title="${esc(row.name||'')}" style="overflow:hidden;text-overflow:ellipsis">${esc(row.name||'—')}</td>
-      <td class="td-mono">${esc(row.phone||'—')}</td>
+      <td class="td-mono">${row.phone
+        ? `<a href="${buildWALink(row.phone,'')}" target="_blank" onclick="event.stopPropagation()"
+             style="color:var(--text2);text-decoration:none;border-bottom:1px dashed var(--border2)"
+             title="Abrir WhatsApp">${esc(row.phone)}</a>`
+        : '—'}</td>
       <td class="td-rut">${esc(formatRUT(row.document))}</td>
       <td><span class="badge ${st.cls}"><i></i>${st.label}</span>${ptag}</td>
       <td><div style="display:flex;gap:4px">
@@ -600,6 +606,129 @@ async function doDedupe() {
 }
 
 /* ── Clear ───────────────────────────────────────────────────── */
+/* ── Cambio masivo de estado ─────────────────────────────────── */
+async function doBulkStatus() {
+  const newStatus = $('bulkStatusSelect').value;
+  if (!newStatus) { toast('Selecciona un estado para aplicar', 'warn'); return; }
+  if (!selectedIds.size) { toast('Selecciona contactos con Ctrl+click', 'warn'); return; }
+
+  const label = STS[newStatus]?.label || newStatus;
+  if (!confirm(`¿Cambiar ${fmtNum(selectedIds.size)} contactos a "${label}"?`)) return;
+
+  ilog(`Cambiando estado de ${fmtNum(selectedIds.size)} contactos…`);
+  let done = 0;
+  for (const id of selectedIds) {
+    await updateContactStatus(id, newStatus);
+    done++;
+    if (done % 50 === 0) ilog(`Actualizando… ${fmtNum(done)} / ${fmtNum(selectedIds.size)}`);
+  }
+  await recalculateKPIs();
+  await refreshKPIs();
+  await loadPage(page);
+  selectedIds.clear();
+  updateSel();
+  $('bulkStatusSelect').value = '';
+  toast(`✓ ${fmtNum(done)} contactos → ${label}`, 'success', 4000);
+  ilog(`Listo: ${fmtNum(done)} contactos actualizados`);
+}
+
+/* ── Panel de conversión ─────────────────────────────────────── */
+async function doShowConversion() {
+  const kpis = await getKPIs();
+  const total = kpis.total || 1; // evitar división por cero
+
+  const pct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
+  const bar = (n, color) => {
+    const w = total > 0 ? Math.round((n / total) * 100) : 0;
+    return `<div style="height:8px;border-radius:4px;background:var(--border);margin-top:4px">
+      <div style="height:8px;border-radius:4px;background:${color};width:${w}%;transition:width .4s"></div>
+    </div>`;
+  };
+
+  // Tasa de contactados sobre total
+  const contactRate = ((kpis.contacted || 0) + (kpis.responded || 0) + (kpis.purchased || 0)) / total;
+  // De los contactados, cuántos respondieron
+  const contactedTotal = (kpis.contacted || 0) + (kpis.responded || 0) + (kpis.purchased || 0);
+  const responseRate = contactedTotal > 0
+    ? (((kpis.responded || 0) + (kpis.purchased || 0)) / contactedTotal * 100).toFixed(1)
+    : '0.0';
+  const purchaseRate = contactedTotal > 0
+    ? ((kpis.purchased || 0) / contactedTotal * 100).toFixed(1)
+    : '0.0';
+
+  $('conversionContent').innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:16px">
+
+      <!-- Embudo visual -->
+      <div style="background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:12px;font-weight:600">Embudo de contacto</div>
+
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px">
+            <span style="color:var(--text2)">Base total</span>
+            <span style="font-family:var(--mono);font-weight:600">${fmtNum(kpis.total || 0)}</span>
+          </div>
+          ${bar(kpis.total || 0, 'var(--border2)')}
+        </div>
+
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px">
+            <span style="color:var(--blue)">Contactados</span>
+            <span style="font-family:var(--mono);font-weight:600">${fmtNum(kpis.contacted || 0)} <span style="color:var(--text3);font-weight:400">${pct(kpis.contacted || 0)}</span></span>
+          </div>
+          ${bar(kpis.contacted || 0, 'var(--blue)')}
+        </div>
+
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px">
+            <span style="color:var(--violet)">Respondieron</span>
+            <span style="font-family:var(--mono);font-weight:600">${fmtNum(kpis.responded || 0)} <span style="color:var(--text3);font-weight:400">${pct(kpis.responded || 0)}</span></span>
+          </div>
+          ${bar(kpis.responded || 0, 'var(--violet)')}
+        </div>
+
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px">
+            <span style="color:var(--green)">Compraron</span>
+            <span style="font-family:var(--mono);font-weight:600">${fmtNum(kpis.purchased || 0)} <span style="color:var(--text3);font-weight:400">${pct(kpis.purchased || 0)}</span></span>
+          </div>
+          ${bar(kpis.purchased || 0, 'var(--green)')}
+        </div>
+      </div>
+
+      <!-- Métricas de tasa -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div style="background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Tasa contacto</div>
+          <div style="font-size:24px;font-weight:700;font-family:var(--mono);color:var(--blue)">${(contactRate * 100).toFixed(1)}%</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">del total</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Tasa respuesta</div>
+          <div style="font-size:24px;font-weight:700;font-family:var(--mono);color:var(--violet)">${responseRate}%</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">de contactados</div>
+        </div>
+        <div style="background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Tasa compra</div>
+          <div style="font-size:24px;font-weight:700;font-family:var(--mono);color:var(--green)">${purchaseRate}%</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">de contactados</div>
+        </div>
+      </div>
+
+      <!-- Pendientes -->
+      <div style="background:var(--yel-bg);border:1px solid var(--yel-bd);border-radius:8px;padding:12px;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:11px;color:var(--yellow);font-weight:600">Sin contactar aún</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">Potencial sin trabajar</div>
+        </div>
+        <div style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--yellow)">${fmtNum(kpis.pending || 0)}</div>
+      </div>
+
+    </div>`;
+
+  $('conversionModal').classList.remove('hidden');
+}
+
 async function doClear() {
   if (!confirm('¿Eliminar TODOS los datos? No se puede deshacer.\n\nTambien se eliminara el snapshot local.')) return;
   await clearAllData(); await resetKPIs();
