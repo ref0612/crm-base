@@ -189,13 +189,13 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
   return new Promise((resolve, reject) => {
     let added = 0, skipped = 0;
 
-    // Dedup intra-batch: evita insertar el mismo RUT dos veces en el mismo lote
-    const batchSeenRUT = new Set();
+    // Dedup intra-batch por RUT Y por teléfono
+    const batchSeenRUT   = new Set();
+    const batchSeenPhone = new Set();
 
     const t = tx(['contacts','optouts'], 'readwrite');
     const store    = t.objectStore('contacts');
     const optStore = t.objectStore('optouts');
-    const phoneIdx = store.index('phone');
 
     t.oncomplete = () => resolve({ added, skipped });
     t.onerror    = (e) => { console.error('[DB] batch tx error:', e.target.error); reject(e.target.error); };
@@ -205,12 +205,18 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
       // Renombrar id del CSV para no conflictuar con autoIncrement
       if (c.id !== undefined) { c.sourceId = c.id; delete c.id; }
 
-      // Dedup intra-batch solo por RUT
       const rut   = c.document || '';
-      if (rut && batchSeenRUT.has(rut)) { skipped++; continue; }
-      if (rut) batchSeenRUT.add(rut);
+      const phone = c.phone    || '';
 
-      // ── Opt-out check + insert ─────────────────────────────────
+      // Dedup intra-batch: saltar si ya vimos este RUT o este teléfono en el lote
+      if (rut && batchSeenRUT.has(rut))                               { skipped++; continue; }
+      if (phone && phone.replace(/\D/g,'').length >= 7
+          && batchSeenPhone.has(phone))                               { skipped++; continue; }
+
+      if (rut)   batchSeenRUT.add(rut);
+      if (phone) batchSeenPhone.add(phone);
+
+      // Opt-out check + insert
       if (phone) {
         const oor = optStore.get(phone);
         oor.onsuccess = () => { if (oor.result) c.status = 'optout'; insertOne(c); };
@@ -236,17 +242,17 @@ export async function addContactsBatch(contacts = [], fastImport = true) {
 }
 
 /* ─── DEDUPE PASS EN BACKGROUND ─────────────────────────────────
- * Elimina duplicados por RUT (document) SOLAMENTE.
- * No deduplicamos por teléfono porque múltiples personas legítimas
- * pueden compartir un número (familia, empresa, etc.) con RUTs distintos.
+ * Elimina duplicados por RUT (document) Y por teléfono (phone).
+ * Lógica: un contacto se elimina si su RUT O su teléfono ya fue visto.
  * Mantiene el primer registro encontrado (id más bajo = más antiguo).
  */
 export async function dedupePassByPhone(onProgress) {
   if (!db) throw new Error('DB no inicializada');
 
   return new Promise((resolve, reject) => {
-    const seenRUT = new Map(); // rut → id del primer registro
-    const toDelete = [];
+    const seenRUT   = new Map();
+    const seenPhone = new Map();
+    const toDelete  = [];
     let scanned = 0;
 
     const scanTx = db.transaction(['contacts'], 'readonly');
@@ -261,16 +267,22 @@ export async function dedupePassByPhone(onProgress) {
       }
 
       scanned++;
-      const { document: rut, id } = cursor.value;
+      const { document: rut, phone, id } = cursor.value;
+      let isDup = false;
 
-      // Solo deduplicar por RUT — el teléfono NO es clave única
+      // Chequear RUT
       if (rut) {
-        if (seenRUT.has(rut)) {
-          toDelete.push(id);
-        } else {
-          seenRUT.set(rut, id);
-        }
+        if (seenRUT.has(rut)) isDup = true;
+        else seenRUT.set(rut, id);
       }
+
+      // Chequear teléfono (solo si tiene 7+ dígitos)
+      if (!isDup && phone && phone.replace(/\D/g,'').length >= 7) {
+        if (seenPhone.has(phone)) isDup = true;
+        else seenPhone.set(phone, id);
+      }
+
+      if (isDup) toDelete.push(id);
 
       if (scanned % 10000 === 0 && onProgress) {
         onProgress(toDelete.length, scanned, false);
